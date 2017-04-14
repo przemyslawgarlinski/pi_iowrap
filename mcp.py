@@ -78,9 +78,8 @@ class MCP23017(InOutInterface):
         super(MCP23017, self).__init__(16)
         self._address = address
 
-        # Dict containing _MCP23017ListenerThread objects. Key is the
-        # port number. Only running threads should be kept in this dict.
-        self._read_event_threads = {}
+        # _MCP23017ListenerThread
+        self._read_events_thread = None
 
         for number in range(1, 17):
             self._ports[number] = Port(self, number)
@@ -90,10 +89,25 @@ class MCP23017(InOutInterface):
     def __str__(self):
         return 'MCP23017 on address: {}'.format(hex(self._address))
 
-    @property
-    def address(self):
-        """Returns I2C address for this interface, eg. 0x20."""
-        return self._address
+    def __del__(self):
+        """Destructor. Tries to gently stop event listening thread."""
+        if self._read_events_thread:
+            logging.debug(
+                'Gently stopping events thread on interface: %s', self)
+            self._read_events_thread.stop()
+
+    def _get_events_thread(self):
+        """Returns thread that is listening for port value changes.
+        
+        This method initializes the thread if it not exists and should be 
+        always used for getting the listener.
+        
+        :returns _MCP23017ListenerThread
+        """
+        if not self._read_events_thread:
+            self._read_events_thread = _MCP23017ListenerThread(self)
+            self._read_events_thread.run()
+        return self._read_events_thread
 
     def _get_part(self, port_number):
         return self._PART_A if port_number <= 8 else self._PART_B
@@ -199,6 +213,11 @@ class MCP23017(InOutInterface):
                 int(binary_str_to_write, 2)
             )
 
+    @property
+    def address(self):
+        """Returns I2C address for this interface, eg. 0x20."""
+        return self._address
+
     def get_value(self, port_number):
         """Return value read from port.
 
@@ -289,14 +308,11 @@ class MCP23017(InOutInterface):
             on_rising_callback=None,
             on_falling_callback=None):
         self._validate_listen_port_number(port_number)
-        listener = self._read_event_threads.get(port_number)
-        if not listener:
-            listener = _MCP23017ListenerThread(self.get_port(port_number))
-            listener.start()
+        listener = self._get_events_thread()
         if on_rising_callback:
-            listener.rising_callbacks.append(on_rising_callback)
+            listener.on_rising(self.get_port(port_number), on_rising_callback)
         if on_falling_callback:
-            listener.falling_callbacks.append(on_falling_callback)
+            listener.on_falling(self.get_port(port_number), on_falling_callback)
 
     def on_rising_detection(self, port_number, callback):
         self.add_event(
@@ -311,10 +327,11 @@ class MCP23017(InOutInterface):
             on_falling_callback=callback)
 
     def clear_read_events(self, port_number):
-        listener = self._read_event_threads.get(port_number)
-        if listener:
+        listener = self._get_events_thread()
+        listener.clear_events(self.get_port(port_number))
+        if not listener.has_any_events():
             listener.stop()
-            del self._read_event_threads[port_number]
+            self._read_events_thread = None
 
     def is_high_gpa(self, port_number):
         return self.is_high(port_number)
@@ -359,6 +376,51 @@ class MCP23017(InOutInterface):
         return self.get_port(port_number + 8)
 
 
+class _PortListener(object):
+    """Take cares of detecting value changes on given port.
+    
+    It keeps information about port and it's value and all callbacks
+    assigned to changes of this value.
+    """
+
+    def __init__(self, port):
+        self.port = port
+        self.last_read_value = port.value
+        self._rising_callbacks = []
+        self._falling_callbacks = []
+
+    def add_rising_callback(self, callback):
+        self._rising_callbacks.append(callback)
+
+    def add_falling_callback(self, callback):
+        self._falling_callbacks.append(callback)
+
+    def clear_callbacks(self):
+        self._rising_callbacks = []
+        self._falling_callbacks = []
+
+    def get_callbacks_to_trigger(self):
+        if not self._rising_callbacks and not self._falling_callbacks:
+            return []
+        to_trigger = []
+        new_value = self.port.value
+        if new_value != self.last_read_value:
+            if (new_value == InOutInterface.HIGH
+                and self.last_read_value == InOutInterface.LOW):
+                to_trigger.extend(self._rising_callbacks)
+            if (new_value == InOutInterface.LOW
+                and self.last_read_value == InOutInterface.HIGH):
+                to_trigger.extend(self._falling_callbacks)
+
+            self.last_read_value = new_value
+        return to_trigger
+
+    def has_changed(self):
+        """Return true if port value changed since last read."""
+        new_value = self.port.value
+        return new_value != self.last_read_value
+
+
 class _MCP23017ListenerThread(threading.Thread):
     """Thread used for listening on MCP23017 ports.
 
@@ -377,55 +439,56 @@ class _MCP23017ListenerThread(threading.Thread):
     # Time (seconds) that value change must persist to trigger callback.
     SWITCH_DEBOUNCE = 0.2
 
-    def __init__(self, port, rising_callback=None, falling_callback=None):
-        """
-
-        :param port: Port instance
-        :param rising_callback: function or None,
-        :param falling_callback: 
-        """
+    def __init__(self, interface):
         super(_MCP23017ListenerThread, self).__init__(
-            name="Listener on %s" % port)
-        self.rising_callbacks = []
-        if rising_callback:
-            self.rising_callbacks.append(rising_callback)
-        self.falling_callbacks = []
-        if falling_callback:
-            self.falling_callbacks.append(falling_callback)
-        self._port = port
-        self._value = None
-        self._stop = False
-        # Make it a deamon so whole program should not wait for it to terminate.
-        self.setDaemon(True)
+            name="Listener on %s" % interface)
+        self._interface = interface
+        self._listeners_by_port_number = {}
+
+    def on_rising(self, port, callback):
+        self._listeners_by_port_number.get(
+            port.number, _PortListener(port)
+        ).add_rising_callback(callback)
+
+    def on_falling(self, port, callback):
+        self._listeners_by_port_number.get(
+            port.number, _PortListener(port)
+        ).add_falling_callback(callback)
+
+    def clear_events(self, port):
+        if port.number in self._listeners_by_port_number:
+            self._listeners_by_port_number[port.number].clear_callbacks()
+
+    def has_any_events(self):
+        """Returns true if there are any events defined for any port.
+        
+        If returns false it might be a good indication that this thread
+        is no longer needed.
+        """
+        return bool(self._listeners_by_port_number)
 
     def stop(self):
         self._stop = True
 
     def run(self):
-        self._value = self._port.value
         while not self._stop:
-            to_trigger = []
-            new_value = self._port.value
-            if (new_value == InOutInterface.HIGH
-                and self._value == InOutInterface.LOW):
-                to_trigger.extend(self.rising_callbacks)
-            if (new_value == InOutInterface.LOW
-                and self._value == InOutInterface.HIGH):
-                to_trigger.extend(self.falling_callbacks)
+            trigger_data_by_port_number = {}
+            for port_number, port_listener in (
+                    self._listeners_by_port_number.iteritems()):
+                callbacks = port_listener.get_callbacks_to_trigger()
+                if callbacks:
+                    trigger_data_by_port_number[port_number] = (
+                        callbacks, port_listener)
 
-            if to_trigger:
+            if trigger_data_by_port_number:
                 time.sleep(self.SWITCH_DEBOUNCE)
-                if new_value == self._port.value:
-                    logging.debug(
-                        'Port %s changed state (%s->%s).',
-                        self._port,
-                        self._value,
-                        new_value)
-                    self._value = new_value
-                    for callback in to_trigger:
-                        callback(self._port, new_value)
-            else:
-                self._value = new_value
+                for port_number, trigger_data in (
+                        trigger_data_by_port_number.iteritems()):
+                    if not self._listeners_by_port_number[port_number].has_changed():
+                        for callback in trigger_data[0]:
+                            callback(
+                                trigger_data[1].port,
+                                trigger_data[1].last_read_value
+                            )
 
             time.sleep(0.01)
-
