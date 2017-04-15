@@ -186,6 +186,12 @@ class InOutInterface(object):
             port_number,
             on_rising_callback=None,
             on_falling_callback=None):
+        """Adds event that should be trigger on port value change.
+        
+        Callbacks are triggered with following arguments:
+        1. Port object
+        2. Current port value
+        """
         raise NotImplementedError
 
     def on_rising_detection(self, port_number, callback):
