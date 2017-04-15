@@ -13,6 +13,7 @@ import time
 
 from base import InOutInterface
 from base import IS_NO_HARDWARE_MODE
+from base import READ_SWITCH_DEBOUNCE
 from base import get_bus
 from port import Port
 
@@ -314,18 +315,6 @@ class MCP23017(InOutInterface):
         if on_falling_callback:
             listener.on_falling(self.get_port(port_number), on_falling_callback)
 
-    def on_rising_detection(self, port_number, callback):
-        self.add_event(
-            port_number,
-            on_rising_callback=callback,
-            on_falling_callback=None)
-
-    def on_falling_detection(self, port_number, callback):
-        self.add_event(
-            port_number,
-            on_rising_callback=None,
-            on_falling_callback=callback)
-
     def clear_read_events(self, port_number):
         listener = self._get_events_thread()
         listener.clear_events(self.get_port(port_number))
@@ -436,9 +425,6 @@ class _MCP23017ListenerThread(threading.Thread):
     to the one read from port afterwards, but who knows, lags might happen).
     """
 
-    # Time (seconds) that value change must persist to trigger callback.
-    SWITCH_DEBOUNCE = 0.2
-
     def __init__(self, interface):
         super(_MCP23017ListenerThread, self).__init__(
             name="Listener on %s" % interface)
@@ -481,7 +467,7 @@ class _MCP23017ListenerThread(threading.Thread):
                         callbacks, port_listener)
 
             if trigger_data_by_port_number:
-                time.sleep(self.SWITCH_DEBOUNCE)
+                time.sleep(READ_SWITCH_DEBOUNCE / 1000)
                 for port_number, trigger_data in (
                         trigger_data_by_port_number.iteritems()):
                     if not self._listeners_by_port_number[port_number].has_changed():

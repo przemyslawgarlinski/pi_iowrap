@@ -4,11 +4,6 @@ It defines abstract class for the io interface on raspberry plus some
 module function for getting RPi.GPIO and SMBus.
 """
 
-# TODO use only one separate thread for all listeners, or at least one for interface (maybe processes?)
-# TODO implement even listeners on gpio interface
-# TODO try to gracefully exit from program killing all threads (signals?)
-
-
 import logging
 from exceptions import InvalidPortNumberError
 
@@ -21,6 +16,9 @@ IS_NO_HARDWARE_MODE = False
 # ask for value of the port when trying to read from it (let's say it is
 # full emulation).
 NO_HARDWARE_ASK_INPUT = False
+
+# Time (ms) that value change on port must persist to treat it as value change.
+READ_SWITCH_DEBOUNCE = 200
 
 _GPIO = None
 _BUS = None
@@ -183,8 +181,24 @@ class InOutInterface(object):
     def set_as_input(self, port_number):
         raise NotImplementedError
 
-    def on_rising_detection(self, port_number, callback):
+    def add_event(
+            self,
+            port_number,
+            on_rising_callback=None,
+            on_falling_callback=None):
         raise NotImplementedError
 
+    def on_rising_detection(self, port_number, callback):
+        self.add_event(
+            port_number,
+            on_rising_callback=callback,
+            on_falling_callback=None)
+
     def on_falling_detection(self, port_number, callback):
+        self.add_event(
+            port_number,
+            on_rising_callback=None,
+            on_falling_callback=callback)
+
+    def clear_read_events(self, port_number):
         raise NotImplementedError

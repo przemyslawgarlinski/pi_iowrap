@@ -13,6 +13,7 @@ import logging
 from base import InOutInterface
 from base import get_gpio
 from base import IS_NO_HARDWARE_MODE
+from base import READ_SWITCH_DEBOUNCE
 from exceptions import InvalidPortNumberError
 from port import Port
 
@@ -120,3 +121,34 @@ class PiInterface(InOutInterface):
         self._gpio_output(port_number, self.LOW)
         return self
 
+    def add_event(
+            self,
+            port_number,
+            on_rising_callback=None,
+            on_falling_callback=None):
+        if IS_NO_HARDWARE_MODE:
+            logging.warning('No hardware mode, adding read event failed.')
+        else:
+            gpio = get_gpio()
+            if on_rising_callback:
+                gpio.add_event_detect(
+                    port_number,
+                    gpio.RISING,
+                    callback=on_rising_callback,
+                    bouncetime=READ_SWITCH_DEBOUNCE)
+                logging.debug(
+                    'Added rising callback (%s) for interface (%d) on port %d',
+                    on_rising_callback, self, port_number)
+            if on_falling_callback:
+                gpio.add_event_detect(
+                    port_number,
+                    gpio.FALLING,
+                    callback=on_falling_callback,
+                    bouncetime=READ_SWITCH_DEBOUNCE)
+                logging.debug(
+                    'Added falling callback (%s) for interface (%d) on port %d',
+                    on_falling_callback, self, port_number)
+
+    def clear_read_events(self, port_number):
+        if not IS_NO_HARDWARE_MODE:
+            get_gpio().remove_event_detect(port_number)
