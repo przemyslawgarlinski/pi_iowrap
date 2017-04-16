@@ -12,8 +12,8 @@ import logging
 
 from base import InOutInterface
 from base import get_gpio
-from base import IS_NO_HARDWARE_MODE
-from base import READ_SWITCH_DEBOUNCE
+from base import Settings
+from base import PortListener
 from exceptions import InvalidPortNumberError
 from port import Port
 
@@ -37,11 +37,23 @@ class PiInterface(InOutInterface):
     _I2C = (3, 5, 27, 28)
     _FORBIDDEN = _GROUND + _POWER_5V + _POWER_3V3 + _I2C
 
+    PULL_UP = 'pull_up'
+    PULL_DOWN = 'pull_down'
+
     def __init__(self):
         super(PiInterface, self).__init__(40)
         for number in range(1, 41):
             if number not in self._FORBIDDEN:
                 self._ports[number] = Port(self, number)
+
+        # Defines the pull up or pull down rezistor for inputs.
+        # Possible values are:
+        # 1. self.PULL_UP
+        # 2. self.PULL_DOWN
+        # 3. None (input fluctuating by default)
+        self.pull_up_down_rezistor = self.PULL_UP
+
+        self._port_listeners = {}
 
         self._initialize_ports()
 
@@ -68,15 +80,28 @@ class PiInterface(InOutInterface):
 
     def _gpio_setup(self, port_number, gpio_attr_name):
         self._validate_port_number(port_number)
-        if IS_NO_HARDWARE_MODE:
+        if Settings.IS_NO_HARDWARE_MODE:
             logging.warning('No hardware mode, no value written')
         else:
             gpio = get_gpio()
-            gpio.setup(port_number, getattr(gpio, gpio_attr_name))
+            if gpio_attr_name == 'IN':
+                # Special case for settings port as input.
+                # Pullup or pulldown rezistor should be set here.
+                kwargs = {}
+                if self.pull_up_down_rezistor == self.PULL_UP:
+                    kwargs['pull_up_down'] = gpio.PUD_UP
+                elif self.pull_up_down_rezistor == self.PULL_DOWN:
+                    kwargs['pull_up_down'] = gpio.PUD_DOWN
+                gpio.setup(
+                    port_number,
+                    getattr(gpio, gpio_attr_name),
+                    **kwargs)
+            else:
+                gpio.setup(port_number, getattr(gpio, gpio_attr_name))
 
     def _gpio_output(self, port_number, value):
         self._validate_port_number(port_number)
-        if IS_NO_HARDWARE_MODE:
+        if Settings.IS_NO_HARDWARE_MODE:
             logging.warning('No hardware mode, no value written')
         else:
             gpio = get_gpio()
@@ -121,48 +146,68 @@ class PiInterface(InOutInterface):
         self._gpio_output(port_number, self.LOW)
         return self
 
-    def _add_event(self, port, gpio_mode, callback):
-        if IS_NO_HARDWARE_MODE:
-            logging.warning('No hardware mode, adding read event failed.')
-        else:
-
-            def gpio_callback(*unused_args):
-                callback(port, port.value)
-
-            gpio = get_gpio()
-            gpio.add_event_detect(
-                port.number,
-                gpio_mode,
-                callback=gpio_callback,
-                bouncetime=READ_SWITCH_DEBOUNCE)
-
     def add_event(
             self,
             port_number,
             on_rising_callback=None,
             on_falling_callback=None):
-        if IS_NO_HARDWARE_MODE:
+        """Adds listening event on given port.
+        
+        In this case 2nd argument passed to a callback is a value read
+        during callback invocation, which in theory might not be the one
+        that actually cause triggering the event.
+        """
+        if Settings.IS_NO_HARDWARE_MODE:
             logging.warning('No hardware mode, adding read event failed.')
         else:
-            gpio = get_gpio()
-            port = self.get_port(port_number)
+            port_listener = self._port_listeners.get(port_number)
+            if not port_listener:
+                port_listener = _PiPortListener(self.get_port(port_number))
+                gpio = get_gpio()
+                gpio.add_event_detect(
+                    port_number,
+                    gpio.BOTH,
+                    callback=port_listener.trigger_callbacks,
+                    bouncetime=Settings.READ_SWITCH_DEBOUNCE)
+                self._port_listeners[port_number] = port_listener
+
             if on_rising_callback:
-                self._add_event(
-                    port,
-                    gpio.RISING,
-                    on_rising_callback)
                 logging.debug(
-                    'Added rising callback (%s) for interface (%d) on port %d',
-                    on_rising_callback, self, port_number)
+                    'Adding rising callback for interface (%s) on port %d',
+                    self, port_number)
+                port_listener.add_rising_callback(on_rising_callback)
             if on_falling_callback:
-                self._add_event(
-                    port,
-                    gpio.FALLING,
-                    on_falling_callback)
                 logging.debug(
-                    'Added falling callback (%s) for interface (%d) on port %d',
-                    on_falling_callback, self, port_number)
+                    'Adding falling callback for interface (%s) on port %d',
+                    self, port_number)
+                port_listener.add_falling_callback(on_falling_callback)
 
     def clear_read_events(self, port_number):
-        if not IS_NO_HARDWARE_MODE:
+        if not Settings.IS_NO_HARDWARE_MODE:
             get_gpio().remove_event_detect(port_number)
+            if port_number in self._port_listeners:
+                del self._port_listeners[port_number]
+
+
+class _PiPortListener(PortListener):
+    def get_callbacks_to_trigger(self):
+        if not self._rising_callbacks and not self._falling_callbacks:
+            return []
+        to_trigger = []
+        port_value = self.port.value
+        if (port_value == InOutInterface.HIGH):
+            to_trigger.extend(self._rising_callbacks)
+            logging.debug(
+                'Event detected on interface (%s) on port (%d). '
+                'Type: RISING.',
+                self.port.interface,
+                self.port.number)
+        elif (port_value == InOutInterface.LOW):
+            to_trigger.extend(self._falling_callbacks)
+            logging.debug(
+                'Event detected on interface (%s) on port (%d). '
+                'Type: FALLING.',
+                self.port.interface,
+                self.port.number)
+
+        return to_trigger

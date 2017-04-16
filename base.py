@@ -8,17 +8,19 @@ import logging
 from exceptions import InvalidPortNumberError
 
 
-# When set to True smbus libs are not needed and all calls are mocked,
-# which means the module will work but with no results. It will send logs.
-IS_NO_HARDWARE_MODE = False
+class Settings(object):
+    # When set to True smbus libs are not needed and all calls are mocked,
+    # which means the module will work but with no results. It will send logs.
+    IS_NO_HARDWARE_MODE = False
 
-# When set to True and IS_NO_HARDWARE_MODE is set to True, the program will
-# ask for value of the port when trying to read from it (let's say it is
-# full emulation).
-NO_HARDWARE_ASK_INPUT = False
+    # When set to True and IS_NO_HARDWARE_MODE is set to True, the program will
+    # ask for value of the port when trying to read from it (let's say it is
+    # full emulation).
+    NO_HARDWARE_ASK_INPUT = False
 
-# Time (ms) that value change on port must persist to treat it as value change.
-READ_SWITCH_DEBOUNCE = 200
+    # Time (ms) that value change on port must persist to treat it as value change.
+    READ_SWITCH_DEBOUNCE = 200
+
 
 _GPIO = None
 _BUS = None
@@ -35,27 +37,40 @@ def _initialize_pi_libs():
         GPIO.setmode(GPIO.BOARD)
     except ImportError:
         # When running in "NO HARDWARE" mode allow to not have smbus library
-        if not IS_NO_HARDWARE_MODE:
+        if not Settings.IS_NO_HARDWARE_MODE:
             raise
 
 
 def get_bus():
     global _BUS
-    if not _BUS and not IS_NO_HARDWARE_MODE:
+    if not _BUS and not Settings.IS_NO_HARDWARE_MODE:
         _initialize_pi_libs()
     return _BUS
 
 
 def get_gpio():
     global _GPIO
-    if not _GPIO and not IS_NO_HARDWARE_MODE:
+    if not _GPIO and not Settings.IS_NO_HARDWARE_MODE:
         _initialize_pi_libs()
     return _GPIO
 
 
+_cleanup_callbacks = []
+
+
+def register_on_cleanup(callback):
+    _cleanup_callbacks.append(callback)
+
+
 def cleanup():
-    if not IS_NO_HARDWARE_MODE:
+    logging.debug('Starting the iowrap cleanup.')
+    for cleanup_callback in _cleanup_callbacks:
+        cleanup_callback()
+    if not Settings.IS_NO_HARDWARE_MODE:
         get_gpio().cleanup()
+    logging.debug('iowrap cleanup done.')
+
+
 
 
 class InOutInterface(object):
@@ -127,9 +142,9 @@ class InOutInterface(object):
         In case NO_HARDWARE_ASK_INPUT equals False it will always 
         return self._LOW.
         """
-        if IS_NO_HARDWARE_MODE:
+        if Settings.IS_NO_HARDWARE_MODE:
             logging.warning('No hardware mode, no read can be done.')
-            if NO_HARDWARE_ASK_INPUT:
+            if Settings.NO_HARDWARE_ASK_INPUT:
                 user_input = raw_input(
                     'Enter value you\'d like your port (%s) to return '
                     '(1 - high, 0 - low): ' % self.get_port(port_number))
@@ -208,3 +223,30 @@ class InOutInterface(object):
 
     def clear_read_events(self, port_number):
         raise NotImplementedError
+
+
+class PortListener(object):
+    """Decides "if" and "what" for triggering read events on inputs."""
+
+    def __init__(self, port):
+        self.port = port
+        self.last_read_value = port.value
+        self._rising_callbacks = []
+        self._falling_callbacks = []
+
+    def add_rising_callback(self, callback):
+        self._rising_callbacks.append(callback)
+
+    def add_falling_callback(self, callback):
+        self._falling_callbacks.append(callback)
+
+    def clear_callbacks(self):
+        self._rising_callbacks = []
+        self._falling_callbacks = []
+
+    def get_callbacks_to_trigger(self):
+        raise NotImplementedError
+
+    def trigger_callbacks(self, *args, **kwargs):
+        for callback in self.get_callbacks_to_trigger():
+            callback(self.port, self.last_read_value)

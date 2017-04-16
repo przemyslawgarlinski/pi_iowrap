@@ -7,6 +7,8 @@ like a proxy for commands that are sent from single port to gpio.
 
 import logging
 
+from base import InOutInterface
+
 
 class Port(object):
     def __init__(self, interface, number):
@@ -24,6 +26,10 @@ class Port(object):
     @property
     def number(self):
         return self._number
+
+    @property
+    def interface(self):
+        return self._interface
 
     @property
     def value(self):
@@ -86,4 +92,3 @@ class Port(object):
     def clear_value_change_listeners(self):
         """Clears all callbacks set with on_falling and on rising methods."""
         self._interface.clear_read_events(self._number)
-

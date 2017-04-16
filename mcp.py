@@ -12,12 +12,27 @@ import threading
 import time
 
 from base import InOutInterface
-from base import IS_NO_HARDWARE_MODE
-from base import READ_SWITCH_DEBOUNCE
+from base import Settings
 from base import get_bus
+from base import register_on_cleanup
+from base import PortListener
 from port import Port
 
 from exceptions import Error
+
+
+# Tracks all created MCP23017 objects. It then allows to do a proper cleanup.
+_REGISTRY = []
+
+
+def cleanup():
+    logging.debug('Starting iowrap.mcp cleanup.')
+    for interface in _REGISTRY:
+        interface.clear_all_read_events()
+    logging.debug('iowrap.mcp cleanup done.')
+
+
+register_on_cleanup(cleanup)
 
 
 class MCP23017(InOutInterface):
@@ -82,20 +97,22 @@ class MCP23017(InOutInterface):
         # _MCP23017ListenerThread
         self._read_events_thread = None
 
+        # Determines if pull up rezistor should be set for inputs.
+        # If False nothing will be set, so by default input will be
+        # fluctuating.
+        self.use_pullup_rezistor = True
+
         for number in range(1, 17):
             self._ports[number] = Port(self, number)
 
+        _REGISTRY.append(self)
         self._initialize_ports()
 
     def __str__(self):
         return 'MCP23017 on address: {}'.format(hex(self._address))
 
     def __del__(self):
-        """Destructor. Tries to gently stop event listening thread."""
-        if self._read_events_thread:
-            logging.debug(
-                'Gently stopping events thread on interface: %s', self)
-            self._read_events_thread.stop()
+        self.clear_all_read_events()
 
     def _get_events_thread(self):
         """Returns thread that is listening for port value changes.
@@ -107,7 +124,7 @@ class MCP23017(InOutInterface):
         """
         if not self._read_events_thread:
             self._read_events_thread = _MCP23017ListenerThread(self)
-            self._read_events_thread.run()
+            self._read_events_thread.start()
         return self._read_events_thread
 
     def _get_part(self, port_number):
@@ -146,6 +163,15 @@ class MCP23017(InOutInterface):
             return 0x00
         elif part == self._PART_B:
             return 0x01
+
+    def _get_pullup_register(self, port_number):
+        """Returns register for setting pullup rezistor for inputs."""
+        part = self._get_part(port_number)
+        if part == self._PART_A:
+            return 0x0C
+        elif part == self._PART_B:
+            return 0x0D
+
 
     def _get_binary_string_for_value(
             self,
@@ -205,7 +231,7 @@ class MCP23017(InOutInterface):
             binary_str_to_write
         )
 
-        if IS_NO_HARDWARE_MODE:
+        if Settings.IS_NO_HARDWARE_MODE:
             logging.warning('No hardware mode, no write done.')
         else:
             get_bus().write_byte_data(
@@ -287,6 +313,13 @@ class MCP23017(InOutInterface):
             self.HIGH,
             lambda x: self.HIGH if x.is_input else self.LOW
         )
+        if self.use_pullup_rezistor:
+            self._set_value(
+                port_number,
+                self._get_pullup_register(port_number),
+                self.HIGH,
+                lambda x: self.HIGH if x.is_input else self.LOW
+            )
         self._in_out_registry[port_number] = self._INPUT
         return self
 
@@ -316,10 +349,19 @@ class MCP23017(InOutInterface):
             listener.on_falling(self.get_port(port_number), on_falling_callback)
 
     def clear_read_events(self, port_number):
-        listener = self._get_events_thread()
-        listener.clear_events(self.get_port(port_number))
-        if not listener.has_any_events():
-            listener.stop()
+        listener = self._read_events_thread
+        if listener:
+            listener.clear_events(self.get_port(port_number))
+            if not listener.has_any_events():
+                listener.stop()
+                self._read_events_thread = None
+
+    def clear_all_read_events(self):
+        """Completely destroys read event thread if it exists."""
+        if self._read_events_thread:
+            logging.debug(
+                'Gently stopping events thread on interface: %s', self)
+            self._read_events_thread.stop()
             self._read_events_thread = None
 
     def is_high_gpa(self, port_number):
@@ -365,28 +407,10 @@ class MCP23017(InOutInterface):
         return self.get_port(port_number + 8)
 
 
-class _PortListener(object):
-    """Take cares of detecting value changes on given port.
-    
-    It keeps information about port and it's value and all callbacks
-    assigned to changes of this value.
-    """
-
+class _MCPPortListener(PortListener):
     def __init__(self, port):
-        self.port = port
+        super(_MCPPortListener, self).__init__(port)
         self.last_read_value = port.value
-        self._rising_callbacks = []
-        self._falling_callbacks = []
-
-    def add_rising_callback(self, callback):
-        self._rising_callbacks.append(callback)
-
-    def add_falling_callback(self, callback):
-        self._falling_callbacks.append(callback)
-
-    def clear_callbacks(self):
-        self._rising_callbacks = []
-        self._falling_callbacks = []
 
     def get_callbacks_to_trigger(self):
         if not self._rising_callbacks and not self._falling_callbacks:
@@ -430,15 +454,18 @@ class _MCP23017ListenerThread(threading.Thread):
             name="Listener on %s" % interface)
         self._interface = interface
         self._listeners_by_port_number = {}
+        self._stop = False
+        # Make it a deamon so whole program should not wait for it to terminate.
+        self.setDaemon(True)
 
     def on_rising(self, port, callback):
-        self._listeners_by_port_number.get(
-            port.number, _PortListener(port)
+        self._listeners_by_port_number.setdefault(
+            port.number, _MCPPortListener(port)
         ).add_rising_callback(callback)
 
     def on_falling(self, port, callback):
-        self._listeners_by_port_number.get(
-            port.number, _PortListener(port)
+        self._listeners_by_port_number.setdefault(
+            port.number, _MCPPortListener(port)
         ).add_falling_callback(callback)
 
     def clear_events(self, port):
@@ -457,6 +484,7 @@ class _MCP23017ListenerThread(threading.Thread):
         self._stop = True
 
     def run(self):
+        logging.debug('Starting event thread on %s', self._interface)
         while not self._stop:
             trigger_data_by_port_number = {}
             for port_number, port_listener in (
@@ -467,10 +495,16 @@ class _MCP23017ListenerThread(threading.Thread):
                         callbacks, port_listener)
 
             if trigger_data_by_port_number:
-                time.sleep(READ_SWITCH_DEBOUNCE / 1000)
+                time.sleep(Settings.READ_SWITCH_DEBOUNCE / 1000)
                 for port_number, trigger_data in (
                         trigger_data_by_port_number.iteritems()):
                     if not self._listeners_by_port_number[port_number].has_changed():
+                        logging.debug(
+                            'Event detected on interface (%s) on port (%s). '
+                            'Type: %s.',
+                            self._interface,
+                            port_number,
+                            'RISING' if trigger_data[1].last_read_value == MCP23017.HIGH else 'FALLING')
                         for callback in trigger_data[0]:
                             callback(
                                 trigger_data[1].port,
