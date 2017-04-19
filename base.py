@@ -159,7 +159,7 @@ class InOutInterface(object):
     def get_port(self, port_number):
         """Returns port.
 
-        :rtype: Port
+        :returns port.Port
         """
         self._validate_port_number(port_number)
         return self._ports[port_number]
