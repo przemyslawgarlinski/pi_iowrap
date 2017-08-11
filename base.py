@@ -7,7 +7,8 @@ module function for getting RPi.GPIO and SMBus.
 import logging
 from exceptions import InvalidPortNumberError
 
-
+# TODO: get rid of no hardware mode and such no-device solutions because
+# it has no sense
 class Settings(object):
     # When set to True smbus libs are not needed and all calls are mocked,
     # which means the module will work but with no results. It will send logs.
@@ -118,11 +119,11 @@ class InOutInterface(object):
     def _validate_port_number(self, port_number):
         if port_number <= 0:
             raise InvalidPortNumberError(
-                'Provided port number(%d) is not greater then 0.', port_number)
+                'Provided port number(%d) is not greater then 0.' % port_number)
         if port_number >= len(self._ports):
             raise InvalidPortNumberError(
                 'Provided port number(%d) is greater then highest '
-                'port number(%d)', port_number, len(self._ports))
+                'port number(%d)' % (port_number, len(self._ports)))
 
     def _validate_write_port_number(self, port_number):
         if self._in_out_registry[port_number] == self._INPUT:

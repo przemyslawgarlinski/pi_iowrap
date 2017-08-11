@@ -195,7 +195,6 @@ class MCP23017(InOutInterface):
         :return: string with binary representation of new value
 
         """
-        # ports = None
         part = self._get_part(port_number)
         start_port_number = 1
         if part == self._PART_B:
@@ -219,6 +218,9 @@ class MCP23017(InOutInterface):
             register,
             value,
             siblings_value_getter):
+        # TODO: siblings_value_getter is weak solution. It reads all ports which cause
+        # the lag. The result is that if the second port is blinking it will never
+        # get the right thing done. Change it to read all siblings at once
 
         binary_str_to_write = self._get_binary_string_for_value(
             port_number,
