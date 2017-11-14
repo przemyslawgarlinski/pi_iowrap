@@ -165,6 +165,14 @@ class InOutInterface(object):
         self._validate_port_number(port_number)
         return self._ports[port_number]
 
+    def get_all_ports(self):
+        """Returns all ports as 0-indexed list."""
+        return [p for p in self._ports if p]
+
+    def get_ports(self, *port_numbers):
+        """Returns collection of ports for given port numbers."""
+        return [self.get_port(port_number) for port_number in port_numbers]
+
     def get_value(self, port_number):
         """Returns either self._HIGH or self._LOW."""
         raise NotImplementedError
