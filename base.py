@@ -128,14 +128,14 @@ class InOutInterface(object):
     def _validate_write_port_number(self, port_number):
         if self._in_out_registry[port_number] == self._INPUT:
             raise InvalidPortNumberError(
-                'Provided port number(%d) is set as input, can not set value '
-                'for it')
+                'Provided port number({}) is set as input, can not set value '
+                'for it.'.format(port_number))
 
     def _validate_listen_port_number(self, port_number):
         if self._in_out_registry[port_number] == self._OUTPUT:
             raise InvalidPortNumberError(
-                'Provided port number(%d) is set as output, '
-                'can not listen for value on it')
+                'Provided port number({}) is set as output, '
+                'can not listen for value on it.'.format(port_number))
 
     def _check_no_hardware_port_value(self, port_number):
         """Reads port value in IS_NO_HARDWARE_MODE.
@@ -200,9 +200,18 @@ class InOutInterface(object):
         raise NotImplementedError
 
     def set_as_output(self, port_number):
+        """Sets port as OUTPUT port, which means it outputs some value.
+
+        In other words port can be set to a certain value
+        (not read value from it).
+        """
         raise NotImplementedError
 
     def set_as_input(self, port_number):
+        """Sets port as INPUT port, which means it awaits some input value.
+
+        In other words you can read from it.
+        """
         raise NotImplementedError
 
     def add_event(
